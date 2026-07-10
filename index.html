@@ -69,7 +69,7 @@
 <div id="menu">
   <div class="slide">
     <h1>BLOB DISH</h1>
-    <div class="sub">SPECIMEN ARENA · 10 CELLS · v1.1</div>
+    <div class="sub">SPECIMEN ARENA · 10 CELLS · v0.1</div>
     <input id="nameIn" maxlength="12" placeholder="your name" autocomplete="off">
     <button class="btn host" id="hostBtn">HOST A DISH</button>
     <button class="btn join" id="joinBtn">JOIN A DISH</button>
@@ -102,7 +102,7 @@ const FOOD_N = 700;
 const START_MASS = 20;
 const MIN_SPLIT_MASS = 36;
 const MAX_CELLS = 8;
-const MERGE_TIME = 11;          // seconds before halves can rejoin
+const mergeTime = m => Math.min(20, 8 + m*0.02);   // Nebulous-style: bigger = longer
 const EAT_RATIO = 1.15;
 const SNAP_HZ = 15;
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -188,6 +188,18 @@ function simulate(dt){
       const r=radius(c.m);
       c.x=clamp(c.x,r,WORLD-r); c.y=clamp(c.y,r,WORLD-r);
     }
+    // merge-ready pieces drift toward the group's center so they can rejoin
+    if(p.cells.length>1){
+      let gx=0,gy=0,gm=0;
+      for(const c of p.cells){gx+=c.x*c.m;gy+=c.y*c.m;gm+=c.m;}
+      gx/=gm;gy/=gm;
+      for(const c of p.cells){
+        if(c.mt>0) continue;
+        const ddx=gx-c.x,ddy=gy-c.y,dd=Math.hypot(ddx,ddy);
+        if(dd>1){const s=Math.min(300,120+dd*2.5);
+          c.x+=ddx/dd*s*dt; c.y+=ddy/dd*s*dt;}
+      }
+    }
     selfCollide(p);
   }
   stepPellets(dt); virusHits();
@@ -203,8 +215,9 @@ function doSplit(p){
     c.m/=2;
     const len=Math.hypot(p.in.dx,p.in.dy);
     const ux=len>0.05?p.in.dx/len:1, uy=len>0.05?p.in.dy/len:0;
-    add.push({x:c.x,y:c.y,m:c.m,ix:ux*820,iy:uy*820,mt:MERGE_TIME});
-    c.mt=Math.max(c.mt,MERGE_TIME);
+    const MT=mergeTime(c.m);
+    add.push({x:c.x,y:c.y,m:c.m,ix:ux*820,iy:uy*820,mt:MT});
+    c.mt=Math.max(c.mt,MT);
   }
   p.cells.push(...add);
 }
@@ -269,8 +282,9 @@ function popCell(p,c){
   while(p.cells.length<MAX_CELLS && c.m>44 && n<7){
     c.m/=2; n++;
     const a=rnd(0,Math.PI*2);
-    p.cells.push({x:c.x,y:c.y,m:c.m,ix:Math.cos(a)*560,iy:Math.sin(a)*560,mt:MERGE_TIME});
-    c.mt=Math.max(c.mt,MERGE_TIME);
+    const MT=mergeTime(c.m);
+    p.cells.push({x:c.x,y:c.y,m:c.m,ix:Math.cos(a)*560,iy:Math.sin(a)*560,mt:MT});
+    c.mt=Math.max(c.mt,MT);
   }
 }
 
@@ -280,7 +294,7 @@ function selfCollide(p){
     const a=cs[i],b=cs[j],ra=radius(a.m),rb=radius(b.m);
     const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||0.01;
     if(a.mt<=0&&b.mt<=0){                       // merge
-      if(d<Math.max(ra,rb)*0.6){a.m+=b.m;cs.splice(j,1);j--;}
+      if(d<Math.max(ra,rb)*0.72){a.m+=b.m;cs.splice(j,1);j--;}
     }else if(d<ra+rb){                          // push apart
       const push=(ra+rb-d)/2,ux=dx/d,uy=dy/d;
       a.x-=ux*push;a.y-=uy*push;b.x+=ux*push;b.y+=uy*push;}
@@ -416,7 +430,7 @@ function sendToPlayer(p,msg){if(p.conn&&p.conn.open)p.conn.send(msg);}
 function broadcast(){
   const snap={t:"st",
     p:players.map(p=>({i:p.id,n:p.name,h:p.hue,s:p.score,
-      c:p.cells.map(c=>[Math.round(c.x),Math.round(c.y),Math.round(c.m*10)/10])})),
+      c:p.cells.map(c=>[Math.round(c.x),Math.round(c.y),Math.round(c.m*10)/10,Math.round(c.mt*10)/10])})),
     fe:foodEaten,fn:foodNew,
     v:viruses.map(v=>[Math.round(v.x),Math.round(v.y)]),
     pj:pellets.map(q=>[Math.round(q.x),Math.round(q.y),q.h])};
@@ -480,8 +494,9 @@ cv.addEventListener("pointercancel",joyEnd);
 addEventListener("keydown",e=>{
   if(e.code==="Space")queueSplit();
   if(e.code==="KeyW")queueEject();});
-addEventListener("mousemove",e=>{        // desktop testing
-  if(joy) return;
+const hasTouch=("ontouchstart" in window)||navigator.maxTouchPoints>0;
+addEventListener("mousemove",e=>{        // desktop testing only
+  if(joy||hasTouch) return;
   input.dx=clamp((e.clientX-innerWidth/2)/(innerWidth/4),-1,1);
   input.dy=clamp((e.clientY-innerHeight/2)/(innerHeight/4),-1,1);
 });
@@ -505,7 +520,7 @@ const STARS=(()=>{let s=42;const rr=()=>((s=s*16807%2147483647)/2147483647);
 function view(){
   // returns [players-like list, myCells] for rendering (host: live, client: interpolated)
   if(isHost) return players.map(p=>({n:p.name,h:p.hue,i:p.id,s:p.score,
-    c:p.cells.map(c=>[c.x,c.y,c.m])}));
+    c:p.cells.map(c=>[c.x,c.y,c.m,c.mt])}));
   if(!snapCur) return [];
   if(!snapPrev) return snapCur.p;
   const t=clamp(snapT*SNAP_HZ,0,1), out=[];
@@ -607,6 +622,11 @@ function draw(dt){
       ctx.font=`700 ${Math.max(11,r*0.34)}px ui-rounded,sans-serif`;
       ctx.textAlign="center";ctx.textBaseline="middle";
       ctx.fillText(p.n,x,y);
+      if(p.i===myId&&c[3]>0.05){
+        ctx.fillStyle="rgba(255,255,255,.7)";
+        ctx.font=`700 ${Math.max(10,r*0.26)}px ui-rounded,sans-serif`;
+        ctx.fillText(Math.ceil(c[3]),x,y+r*0.45);
+      }
     }
   }
   ctx.restore();
