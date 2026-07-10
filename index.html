@@ -69,7 +69,7 @@
 <div id="menu">
   <div class="slide">
     <h1>BLOB DISH</h1>
-    <div class="sub">SPECIMEN ARENA · 10 CELLS · v0.1</div>
+    <div class="sub">SPECIMEN ARENA · 10 CELLS · v0.2</div>
     <input id="nameIn" maxlength="12" placeholder="your name" autocomplete="off">
     <button class="btn host" id="hostBtn">HOST A DISH</button>
     <button class="btn join" id="joinBtn">JOIN A DISH</button>
@@ -79,7 +79,7 @@
     </div>
     <button class="btn join" id="soloBtn" style="display:none">PLAY SOLO VS BOTS</button>
     <div id="err"></div>
-    <div class="hint">drag anywhere to steer · SPLIT / EJECT buttons<br>controllers supported · bots fill empty slots</div>
+    <div class="hint">drag anywhere to steer · SPLIT / MERGE buttons<br>controllers supported · bots fill empty slots</div>
   </div>
 </div>
 
@@ -88,7 +88,7 @@
   <div id="board"></div>
   <div id="score"></div>
   <button class="act" id="splitBtn">SPLIT</button>
-  <button class="act" id="ejectBtn">EJECT</button>
+  <button class="act" id="ejectBtn">MERGE</button>
   <div id="pad">🎮 controller connected</div>
   <div id="toast"></div>
 </div>
@@ -101,7 +101,7 @@ const SLOTS = 10;
 const FOOD_N = 700;
 const START_MASS = 20;
 const MIN_SPLIT_MASS = 36;
-const MAX_CELLS = 8;
+const MAX_CELLS = 16;
 const mergeTime = m => Math.min(20, 8 + m*0.02);   // Nebulous-style: bigger = longer
 const EAT_RATIO = 1.15;
 const SNAP_HZ = 15;
@@ -176,7 +176,7 @@ function simulate(dt){
       if(p.respawn<=0){spawn(p); sendToPlayer(p,{t:"re"});} continue;}
     // split / eject requests
     if(p.split){p.split=false; doSplit(p);}
-    if(p.eject){p.eject=false; doEject(p);}
+    if(p.eject){p.eject=false; doMergeAll(p);}
     const len=Math.hypot(p.in.dx,p.in.dy)||1;
     const ux=p.in.dx/len, uy=p.in.dy/len, drive=Math.min(1,len);
     for(const c of p.cells){
@@ -184,7 +184,7 @@ function simulate(dt){
       c.x+=(ux*sp+c.ix)*dt; c.y+=(uy*sp+c.iy)*dt;
       const dec=Math.pow(0.05,dt); c.ix*=dec; c.iy*=dec;
       c.mt=Math.max(0,c.mt-dt);
-      if(c.m>60) c.m-=c.m*0.0025*dt;               // slight decay on big cells
+      // no mass decay — blobs keep what they eat
       const r=radius(c.m);
       c.x=clamp(c.x,r,WORLD-r); c.y=clamp(c.y,r,WORLD-r);
     }
@@ -222,15 +222,11 @@ function doSplit(p){
   p.cells.push(...add);
 }
 
-function doEject(p){
-  const len=Math.hypot(p.in.dx,p.in.dy);
-  const ux=len>0.05?p.in.dx/len:1, uy=len>0.05?p.in.dy/len:0;
-  for(const c of p.cells){
-    if(c.m<MIN_EJECT_MASS) continue;
-    c.m-=EJECT_COST;
-    const r=radius(c.m);
-    pellets.push({x:c.x+ux*r,y:c.y+uy*r,vx:ux*720+rnd(-40,40),vy:uy*720+rnd(-40,40),h:p.hue});
-  }
+function doMergeAll(p){
+  if(p.cells.length<2) return;
+  let gx=0,gy=0,gm=0;
+  for(const c of p.cells){gx+=c.x*c.m;gy+=c.y*c.m;gm+=c.m;}
+  p.cells=[{x:gx/gm,y:gy/gm,m:gm,ix:0,iy:0,mt:0}];
 }
 
 function stepPellets(dt){
@@ -476,7 +472,7 @@ function pollInput(){
     const edge=(i)=>{const now=!!(gp.buttons[i]&&gp.buttons[i].pressed);
       const was=!!padPrev[i]; padPrev[i]=now; return now&&!was;};
     if(edge(0)) queueSplit();
-    if(edge(1)||edge(5)||edge(7)) queueEject();
+    if(edge(1)||edge(5)||edge(7)) queueMerge();
   }else if(padOn){padOn=false;$("pad").style.display="none";}
 }
 
@@ -493,7 +489,7 @@ cv.addEventListener("pointerup",joyEnd);
 cv.addEventListener("pointercancel",joyEnd);
 addEventListener("keydown",e=>{
   if(e.code==="Space")queueSplit();
-  if(e.code==="KeyW")queueEject();});
+  if(e.code==="KeyW")queueMerge();});
 const hasTouch=("ontouchstart" in window)||navigator.maxTouchPoints>0;
 addEventListener("mousemove",e=>{        // desktop testing only
   if(joy||hasTouch) return;
@@ -505,12 +501,12 @@ function queueSplit(){
   if(isHost) splitQueued=true;
   else if(conns[0]&&conns[0].open) conns[0].send({t:"sp"});
 }
-function queueEject(){
+function queueMerge(){
   if(!running) return;
   if(isHost) ejectQueued=true;
   else if(conns[0]&&conns[0].open) conns[0].send({t:"ej"});
 }
-for(const [id,fn] of [["splitBtn",queueSplit],["ejectBtn",queueEject]]){
+for(const [id,fn] of [["splitBtn",queueSplit],["ejectBtn",queueMerge]]){
   $(id).addEventListener("pointerdown",e=>{e.preventDefault();e.stopPropagation();fn();});
 }
 
