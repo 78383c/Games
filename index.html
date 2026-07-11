@@ -188,18 +188,21 @@ function simulate(dt){
       c.x=clamp(c.x,r,WORLD-r); c.y=clamp(c.y,r,WORLD-r);
     }
     // merge-ready pieces drift toward the group's center so they can rejoin
+    p.fm=Math.max(0,(p.fm||0)-dt);
     if(p.cells.length>1){
+      const fm=p.fm>0;
       let gx=0,gy=0,gm=0;
       for(const c of p.cells){gx+=c.x*c.m;gy+=c.y*c.m;gm+=c.m;}
       gx/=gm;gy/=gm;
       for(const c of p.cells){
-        if(c.mt>0) continue;
+        if(fm) c.mt=Math.max(0,c.mt-dt*3);        // recall burns cooldown 4x total
+        if(c.mt>0&&!fm) continue;
         const ddx=gx-c.x,ddy=gy-c.y,dd=Math.hypot(ddx,ddy);
-        if(dd>1){const s=Math.min(300,120+dd*2.5);
+        if(dd>1){const s=Math.min(fm?520:300,(fm?260:120)+dd*2.5);
           c.x+=ddx/dd*s*dt; c.y+=ddy/dd*s*dt;}
       }
     }
-    selfCollide(p);
+    selfCollide(p,dt);
   }
   virusHits();
   eatFood(); eatCells();
@@ -215,17 +218,19 @@ function doSplit(p){
     const len=Math.hypot(p.in.dx,p.in.dy);
     const ux=len>0.05?p.in.dx/len:1, uy=len>0.05?p.in.dy/len:0;
     const MT=mergeTime(c.m);
-    add.push({x:c.x,y:c.y,m:c.m,ix:ux*820,iy:uy*820,mt:MT});
+    const r=radius(c.m);
+    const imp=500+r*9;                              // bigger halves launch further
+    add.push({x:c.x+ux*r*0.9,y:c.y+uy*r*0.9,m:c.m,
+      ix:ux*imp+c.ix*0.5,iy:uy*imp+c.iy*0.5,mt:MT}); // spawn at rim, inherit momentum
+    c.ix-=ux*imp*0.12; c.iy-=uy*imp*0.12;           // slight recoil on the parent
     c.mt=Math.max(c.mt,MT);
   }
   p.cells.push(...add);
 }
 
-function doMergeAll(p){
+function doMergeAll(p){        // MERGE = "recall": 3s of strong pull + faster cooldown drain
   if(p.cells.length<2) return;
-  let gx=0,gy=0,gm=0;
-  for(const c of p.cells){gx+=c.x*c.m;gy+=c.y*c.m;gm+=c.m;}
-  p.cells=[{x:gx/gm,y:gy/gm,m:gm,ix:0,iy:0,mt:0}];
+  p.fm=3;
 }
 
 function virusHits(){
@@ -260,16 +265,28 @@ function popCell(p,c){
   }
 }
 
-function selfCollide(p){
+function selfCollide(p,dt){
   const cs=p.cells;
   for(let i=0;i<cs.length;i++)for(let j=i+1;j<cs.length;j++){
-    const a=cs[i],b=cs[j],ra=radius(a.m),rb=radius(b.m);
+    let a=cs[i],b=cs[j];
+    if(b.m>a.m){const t=a;a=b;b=t;}             // a = bigger cell
+    const ra=radius(a.m),rb=radius(b.m);
     const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||0.01;
-    if(a.mt<=0&&b.mt<=0){                       // merge
-      if(d<Math.max(ra,rb)*0.72){a.m+=b.m;cs.splice(j,1);j--;}
-    }else if(d<ra+rb){                          // push apart
-      const push=(ra+rb-d)/2,ux=dx/d,uy=dy/d;
-      a.x-=ux*push;a.y-=uy*push;b.x+=ux*push;b.y+=uy*push;}
+    if(a.mt<=0&&b.mt<=0){
+      if(d<ra+rb*0.25){                         // deep overlap: big one drinks the small one
+        const dm=Math.min(b.m,Math.max(30,b.m*5)*dt);
+        a.m+=dm; b.m-=dm;
+        // suction pulls the small one toward the big one's center
+        b.x+= -dx/d*140*dt; b.y+= -dy/d*140*dt;
+        if(b.m<1.5){a.m+=b.m;
+          const k=cs.indexOf(b);cs.splice(k,1);
+          if(k<=i)i--; j--;}
+      }
+    }else if(d<ra+rb){                          // squishy push while on cooldown
+      const push=(ra+rb-d)*0.55,ux=dx/d,uy=dy/d;
+      const wa=b.m/(a.m+b.m), wb=a.m/(a.m+b.m); // mass-weighted: small yields more
+      a.x-=ux*push*wa;a.y-=uy*push*wa;
+      b.x+=ux*push*wb;b.y+=uy*push*wb;}
   }
 }
 
