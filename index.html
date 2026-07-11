@@ -270,6 +270,7 @@ function selfCollide(p,dt){
   for(let i=0;i<cs.length;i++)for(let j=i+1;j<cs.length;j++){
     let a=cs[i],b=cs[j];
     if(b.m>a.m){const t=a;a=b;b=t;}             // a = bigger cell
+    if(b.m<=0||a.m<=0) continue;
     const ra=radius(a.m),rb=radius(b.m);
     const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||0.01;
     if(a.mt<=0&&b.mt<=0){
@@ -278,9 +279,7 @@ function selfCollide(p,dt){
         a.m+=dm; b.m-=dm;
         // suction pulls the small one toward the big one's center
         b.x+= -dx/d*140*dt; b.y+= -dy/d*140*dt;
-        if(b.m<1.5){a.m+=b.m;
-          const k=cs.indexOf(b);cs.splice(k,1);
-          if(k<=i)i--; j--;}
+        if(b.m<1.5){a.m+=b.m;b.m=0;}            // fully drained; swept below
       }
     }else if(d<ra+rb){                          // squishy push while on cooldown
       const push=(ra+rb-d)*0.55,ux=dx/d,uy=dy/d;
@@ -288,6 +287,7 @@ function selfCollide(p,dt){
       a.x-=ux*push*wa;a.y-=uy*push*wa;
       b.x+=ux*push*wb;b.y+=uy*push*wb;}
   }
+  p.cells=cs.filter(c=>c.m>0);
 }
 
 function eatFood(){
@@ -429,23 +429,41 @@ function broadcast(){
 function joinGame(code){
   peer=new Peer({debug:1});
   $("err").textContent="connecting…";
+  let joinTO=null,watchIce=null;
+  const settle=()=>{if(joinTO)clearTimeout(joinTO);if(watchIce)clearInterval(watchIce);};
   peer.on("error",e=>{
+    settle();
     $("err").textContent = e.type==="peer-unavailable" ? "no dish with that code" : "connection error: "+e.type;
   });
   peer.on("open",()=>{
     const conn=peer.connect("blobdish-"+code.toUpperCase(),{reliable:true});
     conns=[conn];
+    const natMsg="found the dish but couldn't connect — likely both devices are behind strict mobile NAT (a TURN server would fix this)";
+    joinTO=setTimeout(()=>{
+      if(!running){settle();try{peer.destroy();}catch(_){}connFail(natMsg);}
+    },12000);
+    // report ICE failure as soon as WebRTC gives up (faster than the timeout)
+    watchIce=setInterval(()=>{
+      const pc=conn.peerConnection;
+      if(!pc) return;
+      clearInterval(watchIce);
+      pc.oniceconnectionstatechange=()=>{
+        if((pc.iceConnectionState==="failed"||pc.iceConnectionState==="disconnected")&&!running){
+          settle();try{peer.destroy();}catch(_){}connFail(natMsg);}
+      };
+    },200);
     conn.on("open",()=>conn.send({t:"hi",n:myName}));
     conn.on("data",d=>{
-      if(d.t==="init"){myId=d.id;clientFood=new Map(d.f.map(f=>[f.id,f]));
+      if(d.t==="init"){settle();
+        myId=d.id;clientFood=new Map(d.f.map(f=>[f.id,f]));
         isHost=false; startPlay(code.toUpperCase());}
       else if(d.t==="st"){snapPrev=snapCur;snapCur=d;snapT=0;
         for(const id of d.fe) clientFood.delete(id);
         for(const f of d.fn) clientFood.set(f.id,f);}
       else if(d.t==="dead") showToast("EATEN!");
-      else if(d.t==="full") $("err").textContent="that dish is full (10 players)";
+      else if(d.t==="full"){settle();$("err").textContent="that dish is full (10 players)";}
     });
-    conn.on("close",()=>{showToast("HOST LEFT");setTimeout(()=>location.reload(),1800);});
+    conn.on("close",()=>{if(!running)return;showToast("HOST LEFT");setTimeout(()=>location.reload(),1800);});
   });
 }
 
