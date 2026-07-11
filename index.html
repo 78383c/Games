@@ -55,7 +55,7 @@
     font-weight:800;letter-spacing:.04em;box-shadow:0 0 18px rgba(61,242,196,.25)}
   .act:active{background:rgba(61,242,196,.25)}
   #splitBtn{width:86px;height:86px;bottom:calc(20px + env(safe-area-inset-bottom));font-size:15px}
-  #ejectBtn{width:64px;height:64px;bottom:calc(122px + env(safe-area-inset-bottom));font-size:12px;
+  #mergeBtn{width:64px;height:64px;bottom:calc(122px + env(safe-area-inset-bottom));font-size:12px;
     border-color:#B78BFF;color:#B78BFF;box-shadow:0 0 18px rgba(183,139,255,.25)}
   #pad{position:fixed;top:calc(12px + env(safe-area-inset-top));left:12px;font-size:13px;
     color:var(--dim);display:none}
@@ -88,7 +88,7 @@
   <div id="board"></div>
   <div id="score"></div>
   <button class="act" id="splitBtn">SPLIT</button>
-  <button class="act" id="ejectBtn">MERGE</button>
+  <button class="act" id="mergeBtn">MERGE</button>
   <div id="pad">🎮 controller connected</div>
   <div id="toast"></div>
 </div>
@@ -107,7 +107,6 @@ const EAT_RATIO = 1.15;
 const SNAP_HZ = 15;
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const VIRUS_N = 16, VIRUS_MASS = 100, MAX_VIRUS = 24;
-const EJECT_COST = 16, EJECT_PELLET = 13, MIN_EJECT_MASS = 38;
 
 /* ================= STATE ================= */
 let isHost=false, peer=null, conns=[];      // host: conns list; client: conns[0]
@@ -118,10 +117,10 @@ let running=false, lastT=0;
 let cam={x:WORLD/2,y:WORLD/2,z:1};
 let snapPrev=null, snapCur=null, snapT=0;   // client interpolation
 let clientFood=new Map();
-let input={dx:0,dy:0}, splitQueued=false, ejectQueued=false;
+let input={dx:0,dy:0}, splitQueued=false, mergeQueued=false;
 let joy=null;                 // {ax,ay,dx,dy} anchor + vector while dragging
 let padOn=false, padPrev={};
-let viruses=[], pellets=[];   // host-side; clients read from snapshots
+let viruses=[];               // host-side; clients read from snapshots
 
 const cv=document.getElementById("cv"), ctx=cv.getContext("2d");
 let DPR=1;
@@ -140,7 +139,7 @@ function makeFood(){const id=foodSeq++;
   const f={id,x:rnd(60,WORLD-60),y:rnd(60,WORLD-60),h:Math.floor(rnd(0,360))};
   food.set(id,f); foodNew.push(f); return f;}
 
-function makeVirus(x,y){viruses.push({x:x??rnd(200,WORLD-200),y:y??rnd(200,WORLD-200),fed:0});}
+function makeVirus(x,y){viruses.push({x:x??rnd(200,WORLD-200),y:y??rnd(200,WORLD-200)});}
 
 function makePlayer(name,isBot){
   const p={id:"p"+Math.random().toString(36).slice(2,8),name,isBot,conn:null,
@@ -155,7 +154,7 @@ function totalMass(p){return p.cells.reduce((s,c)=>s+c.m,0);}
 
 /* ================= HOST SIM ================= */
 function hostStart(){
-  players=[]; food.clear(); foodSeq=0; viruses=[]; pellets=[];
+  players=[]; food.clear(); foodSeq=0; viruses=[];
   for(let i=0;i<FOOD_N;i++) makeFood();
   for(let i=0;i<VIRUS_N;i++) makeVirus();
   foodNew=[]; // initial food goes in init message, not diffs
@@ -169,14 +168,14 @@ function simulate(dt){
   const me=players.find(p=>p.id===myId);
   if(me){me.in.dx=input.dx; me.in.dy=input.dy;
     if(splitQueued){me.split=true; splitQueued=false;}
-    if(ejectQueued){me.eject=true; ejectQueued=false;}}
+    if(mergeQueued){me.merge=true; mergeQueued=false;}}
   for(const p of players){
     if(p.isBot) botThink(p,dt);
     if(p.cells.length===0){p.respawn-=dt;
       if(p.respawn<=0){spawn(p); sendToPlayer(p,{t:"re"});} continue;}
-    // split / eject requests
+    // split / merge requests
     if(p.split){p.split=false; doSplit(p);}
-    if(p.eject){p.eject=false; doMergeAll(p);}
+    if(p.merge){p.merge=false; doMergeAll(p);}
     const len=Math.hypot(p.in.dx,p.in.dy)||1;
     const ux=p.in.dx/len, uy=p.in.dy/len, drive=Math.min(1,len);
     for(const c of p.cells){
@@ -202,7 +201,7 @@ function simulate(dt){
     }
     selfCollide(p);
   }
-  stepPellets(dt); virusHits();
+  virusHits();
   eatFood(); eatCells();
   for(const p of players) p.score=Math.max(p.score,Math.floor(totalMass(p)));
   while(food.size<FOOD_N) makeFood();
@@ -227,29 +226,6 @@ function doMergeAll(p){
   let gx=0,gy=0,gm=0;
   for(const c of p.cells){gx+=c.x*c.m;gy+=c.y*c.m;gm+=c.m;}
   p.cells=[{x:gx/gm,y:gy/gm,m:gm,ix:0,iy:0,mt:0}];
-}
-
-function stepPellets(dt){
-  for(let i=pellets.length-1;i>=0;i--){
-    const q=pellets[i];
-    q.x+=q.vx*dt; q.y+=q.vy*dt;
-    const dec=Math.pow(0.02,dt); q.vx*=dec; q.vy*=dec;
-    q.x=clamp(q.x,10,WORLD-10); q.y=clamp(q.y,10,WORLD-10);
-    if(Math.hypot(q.vx,q.vy)<45){
-      pellets.splice(i,1);
-      // did it land in a virus? feeding 7 pellets spawns a new virus
-      const v=viruses.find(v=>Math.hypot(v.x-q.x,v.y-q.y)<radius(VIRUS_MASS));
-      if(v){v.fed++;
-        if(v.fed>=7){v.fed=0;
-          if(viruses.length<MAX_VIRUS) makeVirus(
-            clamp(v.x+q.vx===0?rnd(-200,200):Math.sign(q.vx)*180,200,WORLD-200),
-            clamp(v.y+rnd(-180,180),200,WORLD-200));}
-      }else{
-        const f={id:foodSeq++,x:q.x,y:q.y,h:q.h,big:1};
-        food.set(f.id,f); foodNew.push(f);
-      }
-    }
-  }
 }
 
 function virusHits(){
@@ -303,7 +279,7 @@ function eatFood(){
     for(const f of food.values()){
       const dx=f.x-c.x; if(dx>r||dx<-r) continue;
       const dy=f.y-c.y; if(dy>r||dy<-r) continue;
-      if(dx*dx+dy*dy<r*r){c.m+=(f.big?EJECT_PELLET:1);food.delete(f.id);foodEaten.push(f.id);}
+      if(dx*dx+dy*dy<r*r){c.m+=1;food.delete(f.id);foodEaten.push(f.id);}
     }
   }
 }
@@ -409,8 +385,8 @@ function hostOnData(conn,d){
     if(p){p.in.dx=d.x;p.in.dy=d.y;}
   }else if(d.t==="sp"){
     const p=players.find(x=>x.id===conn._pid); if(p)p.split=true;
-  }else if(d.t==="ej"){
-    const p=players.find(x=>x.id===conn._pid); if(p)p.eject=true;
+  }else if(d.t==="mg"){
+    const p=players.find(x=>x.id===conn._pid); if(p)p.merge=true;
   }
 }
 
@@ -428,8 +404,7 @@ function broadcast(){
     p:players.map(p=>({i:p.id,n:p.name,h:p.hue,s:p.score,
       c:p.cells.map(c=>[Math.round(c.x),Math.round(c.y),Math.round(c.m*10)/10,Math.round(c.mt*10)/10])})),
     fe:foodEaten,fn:foodNew,
-    v:viruses.map(v=>[Math.round(v.x),Math.round(v.y)]),
-    pj:pellets.map(q=>[Math.round(q.x),Math.round(q.y),q.h])};
+    v:viruses.map(v=>[Math.round(v.x),Math.round(v.y)])};
   foodEaten=[];foodNew=[];
   for(const c of conns) if(c.open) c.send(snap);
 }
@@ -460,7 +435,7 @@ function joinGame(code){
 /* ================= INPUT ================= */
 function pollInput(){
   if(joy){ input.dx=joy.dx; input.dy=joy.dy; return; }
-  // gamepad: left stick steer, A=split, B/RB/RT=eject
+  // gamepad: left stick steer, A=split, B/X/Y=merge
   const gps=navigator.getGamepads?navigator.getGamepads():[];
   const gp=gps&&[...gps].find(g=>g&&g.connected);
   if(gp){
@@ -472,7 +447,7 @@ function pollInput(){
     const edge=(i)=>{const now=!!(gp.buttons[i]&&gp.buttons[i].pressed);
       const was=!!padPrev[i]; padPrev[i]=now; return now&&!was;};
     if(edge(0)) queueSplit();
-    if(edge(1)||edge(5)||edge(7)) queueMerge();
+    if(edge(1)||edge(2)||edge(3)) queueMerge();
   }else if(padOn){padOn=false;$("pad").style.display="none";}
 }
 
@@ -489,7 +464,7 @@ cv.addEventListener("pointerup",joyEnd);
 cv.addEventListener("pointercancel",joyEnd);
 addEventListener("keydown",e=>{
   if(e.code==="Space")queueSplit();
-  if(e.code==="KeyW")queueMerge();});
+  if(e.code==="KeyE")queueMerge();});
 const hasTouch=("ontouchstart" in window)||navigator.maxTouchPoints>0;
 addEventListener("mousemove",e=>{        // desktop testing only
   if(joy||hasTouch) return;
@@ -503,10 +478,10 @@ function queueSplit(){
 }
 function queueMerge(){
   if(!running) return;
-  if(isHost) ejectQueued=true;
-  else if(conns[0]&&conns[0].open) conns[0].send({t:"ej"});
+  if(isHost) mergeQueued=true;
+  else if(conns[0]&&conns[0].open) conns[0].send({t:"mg"});
 }
-for(const [id,fn] of [["splitBtn",queueSplit],["ejectBtn",queueMerge]]){
+for(const [id,fn] of [["splitBtn",queueSplit],["mergeBtn",queueMerge]]){
   $(id).addEventListener("pointerdown",e=>{e.preventDefault();e.stopPropagation();fn();});
 }
 
@@ -550,10 +525,12 @@ function draw(dt){
   ctx.translate(W/2,H/2);ctx.scale(z,z);ctx.translate(-cam.x,-cam.y);
   const vw=W/z,vh=H/z,x0=cam.x-vw/2,y0=cam.y-vh/2;
   // starfield (world-anchored, deterministic)
-  ctx.fillStyle="rgba(220,235,255,.5)";
+  const starA=clamp((cam.z-0.15)*1.8,0.05,0.45);   // fade stars as you zoom out
+  ctx.fillStyle=`rgba(200,218,255,${starA})`;
+  const ss=Math.min(1/cam.z,5);                      // cap star size
   for(const s of STARS){
-    if(s[0]<x0-4||s[0]>x0+vw+4||s[1]<y0-4||s[1]>y0+vh+4) continue;
-    ctx.fillRect(s[0],s[1],s[2]/cam.z,s[2]/cam.z);
+    if(s[0]<x0-8||s[0]>x0+vw+8||s[1]<y0-8||s[1]>y0+vh+8) continue;
+    ctx.fillRect(s[0],s[1],s[2]*ss,s[2]*ss);
   }
   // grid
   ctx.strokeStyle="rgba(30,48,90,.5)";ctx.lineWidth=1/cam.z;
@@ -569,14 +546,9 @@ function draw(dt){
   const fsrc=isHost?food:clientFood;
   for(const f of fsrc.values()){
     if(f.x<x0-20||f.x>x0+vw+20||f.y<y0-20||f.y>y0+vh+20) continue;
-    ctx.fillStyle=`hsl(${f.h} 90% 65%)`;
-    ctx.beginPath();ctx.arc(f.x,f.y,f.big?13:7,0,7);ctx.fill();
-  }
-  // flying ejected pellets
-  const pjs=isHost?pellets.map(q=>[q.x,q.y,q.h]):(snapCur&&snapCur.pj)||[];
-  for(const q of pjs){
-    ctx.fillStyle=`hsl(${q[2]} 90% 70%)`;
-    ctx.beginPath();ctx.arc(q[0],q[1],13,0,7);ctx.fill();
+    ctx.fillStyle=`hsl(${f.h} 95% 68%)`;
+    const fr=Math.max(7,5/cam.z);                    // pellets never shrink below ~5px on screen
+    ctx.beginPath();ctx.arc(f.x,f.y,fr,0,7);ctx.fill();
   }
   // viruses (spiky green)
   const vs=isHost?viruses.map(v=>[v.x,v.y]):(snapCur&&snapCur.v)||[];
