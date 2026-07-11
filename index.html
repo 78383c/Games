@@ -489,6 +489,19 @@ function pollInput(){
 cv.addEventListener("pointerdown",e=>{
   joy={ax:e.clientX,ay:e.clientY,dx:0,dy:0};
 });
+/* --- iOS Safari zoom prevention (it ignores user-scalable=no) --- */
+for(const ev of ["gesturestart","gesturechange","gestureend"])
+  document.addEventListener(ev,e=>e.preventDefault(),{passive:false});
+document.addEventListener("touchmove",e=>{
+  if(e.touches.length>1) e.preventDefault();        // pinch
+},{passive:false});
+let lastTap=0;
+document.addEventListener("touchend",e=>{
+  if(!running) return;                              // keep menu taps/clicks working
+  const now=Date.now();
+  if(now-lastTap<300) e.preventDefault();           // double-tap zoom
+  lastTap=now;
+},{passive:false});
 cv.addEventListener("pointermove",e=>{
   if(!joy) return;
   joy.dx=clamp((e.clientX-joy.ax)/55,-1,1);
