@@ -124,7 +124,8 @@ let players=[];                              // host-authoritative
 let food=new Map(), foodSeq=0, foodEaten=[], foodNew=[];
 let running=false, lastT=0;
 let cam={x:WORLD/2,y:WORLD/2,z:1};
-let snapPrev=null, snapCur=null, snapT=0;   // client interpolation
+let snapPrev=null, snapCur=null, snapT=0;
+let clientRoster=new Map(), clientViruses=[];   // client interpolation
 let clientFood=new Map();
 let input={dx:0,dy:0}, splitQueued=false, mergeQueued=false;
 let joy=null;                 // {ax,ay,dx,dy} anchor + vector while dragging
@@ -148,7 +149,8 @@ function makeFood(){const id=foodSeq++;
   const f={id,x:rnd(60,WORLD-60),y:rnd(60,WORLD-60),h:Math.floor(rnd(0,360))};
   food.set(id,f); foodNew.push(f); return f;}
 
-function makeVirus(x,y){viruses.push({x:x??rnd(200,WORLD-200),y:y??rnd(200,WORLD-200)});}
+let virusDirty=true, rosterDirty=true;
+function makeVirus(x,y){viruses.push({x:x??rnd(200,WORLD-200),y:y??rnd(200,WORLD-200)});virusDirty=true;}
 
 function makePlayer(name,isBot,skin){
   const p={id:"p"+Math.random().toString(36).slice(2,8),name,isBot,conn:null,
@@ -253,7 +255,7 @@ function virusHits(){
       for(let vi=viruses.length-1;vi>=0;vi--){
         const v=viruses[vi];
         if(Math.hypot(v.x-c.x,v.y-c.y)<rc-rV*0.35){
-          viruses.splice(vi,1);
+          viruses.splice(vi,1); virusDirty=true;
           c.m+=55;                                 // you absorb it... then POP
           popCell(p,c);
           if(viruses.length<VIRUS_N) makeVirus();
@@ -398,6 +400,7 @@ function hostGame(){
 }
 
 function hostOnData(conn,d){
+  try{
   if(d.t==="hi"){
     if(conn._pid) return;                       // duplicate hi
     const bi=players.findIndex(p=>p.isBot);
@@ -407,8 +410,8 @@ function hostOnData(conn,d){
     const name=String(d.n||"blob").replace(/[<>&"']/g,"").slice(0,12)||"blob";
     const skin=SKIN_DATA[d.k]?d.k:"";
     const np=makePlayer(name,false,skin);
-    np.conn=conn; players.push(np); conn._pid=np.id;
-    conn.send({t:"init",id:np.id,w:WORLD,f:[...food.values()]});
+    np.conn=conn; players.push(np); conn._pid=np.id; rosterDirty=true;
+    try{conn.send({t:"init",id:np.id,w:WORLD,f:[...food.values()],r:roster(),v:viruses.map(v=>[v.x,v.y])});}catch(_){}
   }else if(d.t==="in"){
     const p=players.find(x=>x.id===conn._pid);
     if(p){p.in.dx=d.x;p.in.dy=d.y;}
@@ -417,25 +420,36 @@ function hostOnData(conn,d){
   }else if(d.t==="mg"){
     const p=players.find(x=>x.id===conn._pid); if(p)p.merge=true;
   }
+  }catch(err){console.error("bad packet",err);}
 }
 
 function dropConn(conn){
   const i=players.findIndex(p=>p.id===conn._pid);
   if(i>=0){players.splice(i,1);
-    players.push(makePlayer("Bot"+Math.floor(rnd(10,99)),true));}
+    players.push(makePlayer("Bot"+Math.floor(rnd(10,99)),true));rosterDirty=true;}
   conns=conns.filter(c=>c!==conn);
 }
 
-function sendToPlayer(p,msg){if(p.conn&&p.conn.open)p.conn.send(msg);}
+function safeSend(conn,msg){
+  try{
+    if(!conn||!conn.open) return;
+    const dc=conn.dataChannel;
+    if(dc&&dc.bufferedAmount>65536) return;   // backpressure: skip, don't queue lag
+    conn.send(msg);
+  }catch(_){/* conn died mid-send; dropConn will handle it */}
+}
+function sendToPlayer(p,msg){safeSend(p.conn,msg);}
 
+function roster(){return players.map(p=>({i:p.id,n:p.name,h:p.hue,b:p.isBot?1:0,k:p.skin}));}
 function broadcast(){
   const snap={t:"st",
-    p:players.map(p=>({i:p.id,n:p.name,h:p.hue,s:p.score,b:p.isBot?1:0,k:p.skin,
+    p:players.map(p=>({i:p.id,s:p.score,
       c:p.cells.map(c=>[Math.round(c.x),Math.round(c.y),Math.round(c.m*10)/10,Math.round(c.mt*10)/10])})),
-    fe:foodEaten,fn:foodNew,
-    v:viruses.map(v=>[Math.round(v.x),Math.round(v.y)])};
+    fe:foodEaten,fn:foodNew};
+  if(virusDirty){snap.v=viruses.map(v=>[Math.round(v.x),Math.round(v.y)]);virusDirty=false;}
+  if(rosterDirty){snap.r=roster();rosterDirty=false;}
   foodEaten=[];foodNew=[];
-  for(const c of conns) if(c.open) c.send(snap);
+  for(const c of conns) safeSend(c,snap);
 }
 
 function joinGame(code){
@@ -468,8 +482,11 @@ function joinGame(code){
     conn.on("data",d=>{
       if(d.t==="init"){settle();
         myId=d.id;clientFood=new Map(d.f.map(f=>[f.id,f]));
+        clientRoster=new Map((d.r||[]).map(p=>[p.i,p]));clientViruses=d.v||[];
         isHost=false; startPlay(code.toUpperCase());}
       else if(d.t==="st"){snapPrev=snapCur;snapCur=d;snapT=0;
+        if(d.r) clientRoster=new Map(d.r.map(p=>[p.i,p]));
+        if(d.v) clientViruses=d.v;
         for(const id of d.fe) clientFood.delete(id);
         for(const f of d.fn) clientFood.set(f.id,f);}
       else if(d.t==="dead") showToast("EATEN!");
@@ -488,9 +505,14 @@ function pollInput(){
   if(gp){
     if(!padOn){padOn=true;$("pad").style.display="block";}
     const dz=v=>Math.abs(v)<0.15?0:v;
-    const ax=dz(gp.axes[0]||0), ay=dz(gp.axes[1]||0);
+    let ax=dz(gp.axes[0]||0), ay=dz(gp.axes[1]||0);
+    if(!ax&&!ay){ax=dz(gp.axes[2]||0); ay=dz(gp.axes[3]||0);}  // non-standard mappings
+    if(!ax&&!ay){                                              // d-pad fallback (12-15)
+      const bp=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
+      ax=(bp(15)?1:0)-(bp(14)?1:0); ay=(bp(13)?1:0)-(bp(12)?1:0);
+    }
     if(ax||ay){input.dx=clamp(ax,-1,1);input.dy=clamp(ay,-1,1);}
-    else if(padOn){input.dx=0;input.dy=0;}
+    else {input.dx=0;input.dy=0;}
     const edge=(i)=>{const now=!!(gp.buttons[i]&&gp.buttons[i].pressed);
       const was=!!padPrev[i]; padPrev[i]=now; return now&&!was;};
     if(edge(0)) queueSplit();
@@ -521,6 +543,8 @@ cv.addEventListener("pointermove",e=>{
 });
 const joyEnd=()=>{joy=null;input.dx=0;input.dy=0;};
 cv.addEventListener("pointerup",joyEnd);
+cv.addEventListener("pointercancel",joyEnd);   // Android cancels touches often
+cv.addEventListener("pointerleave",joyEnd);
 cv.addEventListener("pointercancel",joyEnd);
 addEventListener("keydown",e=>{
   if(e.code==="Space")queueSplit();
@@ -553,12 +577,14 @@ function view(){
   if(isHost) return players.map(p=>({n:p.name,h:p.hue,i:p.id,s:p.score,b:p.isBot?1:0,k:p.skin,
     c:p.cells.map(c=>[c.x,c.y,c.m,c.mt])}));
   if(!snapCur) return [];
-  if(!snapPrev) return snapCur.p;
-  const t=clamp(snapT*SNAP_HZ,0,1), out=[];
+  const t=snapPrev?clamp(snapT*SNAP_HZ,0,1):1, out=[];
   for(const p of snapCur.p){
-    const q=snapPrev.p.find(x=>x.i===p.i);
-    if(!q||q.c.length!==p.c.length){out.push(p);continue;}
-    out.push({...p,c:p.c.map((c,k)=>[lerp(q.c[k][0],c[0],t),lerp(q.c[k][1],c[1],t),lerp(q.c[k][2],c[2],t),c[3]])});
+    const meta=clientRoster.get(p.i)||{n:"?",h:0,b:1,k:""};
+    const q=snapPrev&&snapPrev.p.find(x=>x.i===p.i);
+    const c=(q&&q.c.length===p.c.length)
+      ? p.c.map((c,k)=>[lerp(q.c[k][0],c[0],t),lerp(q.c[k][1],c[1],t),lerp(q.c[k][2],c[2],t),c[3]])
+      : p.c;
+    out.push({i:p.i,s:p.s,n:meta.n,h:meta.h,b:meta.b,k:meta.k,c});
   }
   return out;
 }
@@ -618,7 +644,7 @@ function draw(dt){
     ctx.beginPath();ctx.arc(f.x,f.y,fr,0,7);ctx.fill();
   }
   // viruses (spiky green)
-  const vs=isHost?viruses.map(v=>[v.x,v.y]):(snapCur&&snapCur.v)||[];
+  const vs=isHost?viruses.map(v=>[v.x,v.y]):clientViruses;
   const rV=radius(VIRUS_MASS);
   for(const v of vs){
     if(v[0]<x0-rV||v[0]>x0+vw+rV||v[1]<y0-rV||v[1]>y0+vh+rV) continue;
@@ -689,20 +715,28 @@ function draw(dt){
 }
 
 /* ================= LOOP ================= */
+let tickTimer=null,tickLast=0;
+function netTick(){                       // runs on setInterval: survives backgrounded tabs
+  if(!running)return;
+  const now=performance.now();
+  const dt=Math.min(0.05,(now-tickLast)/1000||0.016);tickLast=now;
+  try{
+    pollInput();
+    if(isHost){
+      simulate(dt);
+      netTick._acc=(netTick._acc||0)+dt;
+      if(netTick._acc>=1/SNAP_HZ){netTick._acc=0;broadcast();}
+    }else{
+      netTick._iacc=(netTick._iacc||0)+dt;
+      if(netTick._iacc>=1/SNAP_HZ){netTick._iacc=0;
+        safeSend(conns[0],{t:"in",x:input.dx,y:input.dy});}
+    }
+  }catch(err){console.error("tick error",err);}   // one bad frame must not kill the game
+}
 function loop(ts){
   if(!running)return;
   const dt=Math.min(0.05,(ts-lastT)/1000||0.016);lastT=ts;
-  pollInput();
-  if(isHost){
-    simulate(dt);
-    loop._acc=(loop._acc||0)+dt;
-    if(loop._acc>=1/SNAP_HZ){loop._acc=0;broadcast();}
-  }else{
-    snapT+=dt;
-    loop._iacc=(loop._iacc||0)+dt;
-    if(loop._iacc>=1/SNAP_HZ&&conns[0]&&conns[0].open){loop._iacc=0;
-      conns[0].send({t:"in",x:input.dx,y:input.dy});}
-  }
+  if(!isHost) snapT+=dt;
   draw(dt);
   requestAnimationFrame(loop);
 }
@@ -710,7 +744,8 @@ function loop(ts){
 function startPlay(code){
   $("menu").style.display="none";$("hud").style.display="block";
   $("roomTag").textContent=code;
-  running=true;lastT=performance.now();
+  running=true;lastT=tickLast=performance.now();
+  tickTimer=setInterval(netTick,1000/60);
   requestAnimationFrame(loop);
 }
 
