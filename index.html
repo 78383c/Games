@@ -420,7 +420,7 @@ function sendToPlayer(p,msg){if(p.conn&&p.conn.open)p.conn.send(msg);}
 
 function broadcast(){
   const snap={t:"st",
-    p:players.map(p=>({i:p.id,n:p.name,h:p.hue,s:p.score,
+    p:players.map(p=>({i:p.id,n:p.name,h:p.hue,s:p.score,b:p.isBot?1:0,
       c:p.cells.map(c=>[Math.round(c.x),Math.round(c.y),Math.round(c.m*10)/10,Math.round(c.mt*10)/10])})),
     fe:foodEaten,fn:foodNew,
     v:viruses.map(v=>[Math.round(v.x),Math.round(v.y)])};
@@ -540,7 +540,7 @@ const STARS=(()=>{let s=42;const rr=()=>((s=s*16807%2147483647)/2147483647);
   const a=[];for(let i=0;i<1400;i++)a.push([rr()*WORLD,rr()*WORLD,rr()<0.85?2:4]);return a;})();
 function view(){
   // returns [players-like list, myCells] for rendering (host: live, client: interpolated)
-  if(isHost) return players.map(p=>({n:p.name,h:p.hue,i:p.id,s:p.score,
+  if(isHost) return players.map(p=>({n:p.name,h:p.hue,i:p.id,s:p.score,b:p.isBot?1:0,
     c:p.cells.map(c=>[c.x,c.y,c.m,c.mt])}));
   if(!snapCur) return [];
   if(!snapPrev) return snapCur.p;
@@ -548,7 +548,7 @@ function view(){
   for(const p of snapCur.p){
     const q=snapPrev.p.find(x=>x.i===p.i);
     if(!q||q.c.length!==p.c.length){out.push(p);continue;}
-    out.push({...p,c:p.c.map((c,k)=>[lerp(q.c[k][0],c[0],t),lerp(q.c[k][1],c[1],t),lerp(q.c[k][2],c[2],t)])});
+    out.push({...p,c:p.c.map((c,k)=>[lerp(q.c[k][0],c[0],t),lerp(q.c[k][1],c[1],t),lerp(q.c[k][2],c[2],t),c[3]])});
   }
   return out;
 }
@@ -558,13 +558,20 @@ function draw(dt){
   const me=ps.find(p=>p.i===myId);
   // camera
   if(me&&me.c.length){
-    let mx=0,my=0,mm=0,tr=0;
-    for(const c of me.c){mx+=c[0]*c[2];my+=c[1]*c[2];mm+=c[2];tr+=radius(c[2]);}
+    let mx=0,my=0,mm=0,tr=0,minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+    for(const c of me.c){mx+=c[0]*c[2];my+=c[1]*c[2];mm+=c[2];
+      const r=radius(c[2]);tr+=r;
+      minX=Math.min(minX,c[0]-r);maxX=Math.max(maxX,c[0]+r);
+      minY=Math.min(minY,c[1]-r);maxY=Math.max(maxY,c[1]+r);}
     mx/=mm;my/=mm;
     cam.x=mx; cam.y=my;                       // hard-lock: blob always dead-center
     const span=clamp(tr*14,650,2400);          // world units visible on short screen axis
-    const tz=Math.min(innerWidth,innerHeight)/span;
-    cam.z=lerp(cam.z,tz,1-Math.pow(0.1,dt));   // zoom stays smooth
+    // widen further if split pieces would leave the frame (centroid stays centered)
+    const spanX=2*Math.max(mx-minX,maxX-mx)+260;
+    const spanY=2*Math.max(my-minY,maxY-my)+260;
+    const tz=Math.min(Math.min(innerWidth,innerHeight)/span,
+                      innerWidth/spanX, innerHeight/spanY);
+    cam.z=lerp(cam.z,tz,1-Math.pow(tz<cam.z?0.02:0.1,dt)); // zoom out fast, zoom in gently
   }
   const W=cv.width,H=cv.height,z=cam.z*DPR;
   // nebula backdrop
@@ -627,8 +634,11 @@ function draw(dt){
     const g=ctx.createRadialGradient(x,y,r*0.2,x,y,r*wob);
     g.addColorStop(0,`hsl(${p.h} 85% 62%)`);
     g.addColorStop(1,`hsl(${p.h} 90% 40%)`);
+    if(!p.b){ctx.shadowColor=p.i===myId?"rgba(127,216,255,.95)":`hsla(${p.h} 95% 70% / .85)`;
+      ctx.shadowBlur=p.i===myId?34:24;}
     ctx.fillStyle=g;
     ctx.beginPath();ctx.arc(x,y,r*wob,0,7);ctx.fill();
+    ctx.shadowBlur=0;
     ctx.lineWidth=Math.max(2,r*0.07);
     ctx.strokeStyle=`hsl(${p.h} 95% ${p.i===myId?78:30}%)`;
     ctx.stroke();
